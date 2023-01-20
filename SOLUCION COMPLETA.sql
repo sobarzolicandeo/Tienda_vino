@@ -1,0 +1,306 @@
+--CASO 2
+VARIABLE B_MES NUMBER;
+VARIABLE B_ANNO NUMBER;
+EXEC :B_MES:=5;
+EXEC :B_ANNO:=2021;
+VARIABLE B_LIMITE_COMISION NUMBER;
+EXEC :B_LIMITE_COMISION:=16000;
+
+
+DECLARE
+
+    CURSOR C_LINEA IS
+        SELECT NOM_LINEA
+        FROM LINEA
+        ORDER BY NOM_LINEA;
+        
+    CURSOR C_VENTA(P_LINEA VARCHAR2) IS
+        SELECT V.FEC_VENTA, COUNT(V.ID_VENTA) CANTIDAD,
+               SUM(DV.CANTIDAD*P.PRECIO) TOTAL
+        FROM VENTA V
+            JOIN DETALLE_VENTA DV
+                ON (V.ID_VENTA = DV.ID_VENTA)
+            JOIN PRODUCTO P
+                ON (P.ID_PRODUCTO = DV.ID_PRODUCTO)
+            JOIN LINEA L
+                ON (L.ID_LINEA = P.ID_LINEA)
+        WHERE L.NOM_LINEA = P_LINEA AND
+              EXTRACT (MONTH FROM V.FEC_VENTA) = :B_MES AND
+              EXTRACT (YEAR FROM V.FEC_VENTA) = :B_ANNO
+        GROUP BY V.FEC_VENTA
+        ORDER BY V.FEC_VENTA;
+              
+    R_DETALLE DETALLE_LINEA%ROWTYPE;
+    R_RESUMEN RESUMEN_LINEA%ROWTYPE;
+    V_PCT     NUMBER(5,3);
+    V_SQLERRM VARCHAR2(250);
+
+    TYPE TIPO_VARRAY_VALORES IS VARRAY(6)
+        OF NUMBER(6,2);
+    VARRAY_VALORES TIPO_VARRAY_VALORES;
+    
+    E_COMISION_LIMITE EXCEPTION;
+    
+    V_PCT_COMISION         NUMBER(4,3);
+    V_TOT_NUM_VENTAS       RESUMEN_LINEA.NUM_VENTAS%TYPE;
+    V_TOT_MONTO_VENTAS     RESUMEN_LINEA.MONTO_VENTAS%TYPE;
+    V_TOT_IMPUESTOS        RESUMEN_LINEA.IMPUESTOS%TYPE;
+    V_TOT_DESCTOS_LINEA    RESUMEN_LINEA.DESCTOS_LINEA%TYPE;
+    V_TOT_MONTO_COMISIONES RESUMEN_LINEA.MONTO_COMISIONES%TYPE;
+    V_TOT_MONTO_DELIVERY   RESUMEN_LINEA.MONTO_DELIVERY%TYPE;
+    V_TOT_MONTO_DESCUENTOS RESUMEN_LINEA.MONTO_DESCUENTOS%TYPE;
+    V_TOT_TOTAL_VENTAS     RESUMEN_LINEA.TOTAL_VENTAS%TYPE;
+
+BEGIN
+
+    VARRAY_VALORES:=TIPO_VARRAY_VALORES(0.19,0.17,0.15,0.13,0.11,1500);
+
+    EXECUTE IMMEDIATE 'TRUNCATE TABLE DETALLE_LINEA';
+    EXECUTE IMMEDIATE 'TRUNCATE TABLE RESUMEN_LINEA';
+    EXECUTE IMMEDIATE 'TRUNCATE TABLE ERROR_PROCESO';
+    EXECUTE IMMEDIATE 'DROP SEQUENCE SEQ_ERROR';
+    EXECUTE IMMEDIATE 'CREATE SEQUENCE SEQ_ERROR';
+
+    FOR R_LINEA IN C_LINEA LOOP
+      
+        V_TOT_NUM_VENTAS:=0;
+        V_TOT_MONTO_VENTAS:=0;
+        V_TOT_IMPUESTOS:=0;
+        V_TOT_DESCTOS_LINEA:=0;
+        V_TOT_MONTO_COMISIONES:=0;
+        V_TOT_MONTO_DELIVERY:=0;
+        V_TOT_MONTO_DESCUENTOS:=0;
+        V_TOT_TOTAL_VENTAS:=0;
+            
+      FOR R_VENTA IN C_VENTA(R_LINEA.NOM_LINEA) LOOP      
+        
+        R_DETALLE.MES:=:B_MES;
+        R_DETALLE.ANNIO:=:B_ANNO;
+        R_DETALLE.FECHA:=R_VENTA.FEC_VENTA;
+        R_DETALLE.LINEA:=R_LINEA.NOM_LINEA;
+        R_DETALLE.NUM_VENTAS:=R_VENTA.CANTIDAD;
+        R_DETALLE.MONTO_VENTAS:=R_VENTA.TOTAL;
+        
+        V_TOT_NUM_VENTAS:=V_TOT_NUM_VENTAS+R_VENTA.CANTIDAD;
+        V_TOT_MONTO_VENTAS:=V_TOT_MONTO_VENTAS+R_VENTA.TOTAL;
+        
+        BEGIN
+        
+            SELECT PCTIMPUESTO/100
+                INTO V_PCT
+            FROM IMPUESTO
+            WHERE R_VENTA.TOTAL BETWEEN MTO_VENTA_INF AND MTO_VENTA_SUP;
+        
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                V_SQLERRM:=SQLERRM;
+                V_PCT:=0;
+                INSERT INTO ERROR_PROCESO 
+                    VALUES(SEQ_ERROR.NEXTVAL,
+                           V_SQLERRM,
+                           'No se encontro porcentaje de impuesto para el monto de los pedidos del dia '||R_DETALLE.FECHA);
+                COMMIT;              
+            WHEN TOO_MANY_ROWS THEN
+                V_SQLERRM:=SQLERRM;
+                V_PCT:=0; 
+                INSERT INTO ERROR_PROCESO 
+                    VALUES(SEQ_ERROR.NEXTVAL,
+                           V_SQLERRM,
+                           'Se encontro mas de un porcentaje de impuesto para el monto de los pedidos del dia '||R_DETALLE.FECHA);
+                COMMIT;                  
+        END;
+        
+        R_DETALLE.IMPUESTOS:=R_DETALLE.MONTO_VENTAS*V_PCT;
+        
+        V_TOT_IMPUESTOS:=V_TOT_IMPUESTOS+R_DETALLE.IMPUESTOS;
+        
+        IF R_LINEA.NOM_LINEA = 'Reserva Especial' THEN
+        
+            R_DETALLE.DESCTOS_LINEA:=R_DETALLE.MONTO_VENTAS*VARRAY_VALORES(1);
+            
+        ELSIF R_LINEA.NOM_LINEA = 'Reserva' THEN
+        
+            R_DETALLE.DESCTOS_LINEA:=R_DETALLE.MONTO_VENTAS*VARRAY_VALORES(2);
+            
+        ELSIF R_LINEA.NOM_LINEA = 'Gran Reserva' THEN
+        
+            R_DETALLE.DESCTOS_LINEA:=R_DETALLE.MONTO_VENTAS*VARRAY_VALORES(3);            
+
+        ELSIF R_LINEA.NOM_LINEA = 'Selección' THEN
+        
+            R_DETALLE.DESCTOS_LINEA:=R_DETALLE.MONTO_VENTAS*VARRAY_VALORES(4);            
+        
+        ELSE
+        
+            R_DETALLE.DESCTOS_LINEA:=R_DETALLE.MONTO_VENTAS*VARRAY_VALORES(5);            
+             
+        END IF;
+        
+        V_TOT_DESCTOS_LINEA:=V_TOT_DESCTOS_LINEA+R_DETALLE.DESCTOS_LINEA;
+        
+        
+        SELECT PCTCOMISEMP/100
+            INTO V_PCT_COMISION
+        FROM COMISION_EMPLEADO
+        WHERE R_DETALLE.MONTO_VENTAS 
+            BETWEEN VALOR_INF_VENTA AND VALOR_SUP_VENTA;
+        
+        R_DETALLE.COMISIONES:=R_DETALLE.MONTO_VENTAS*V_PCT_COMISION;
+        
+        BEGIN
+        
+            IF R_DETALLE.COMISIONES > :B_LIMITE_COMISION THEN
+            
+                RAISE E_COMISION_LIMITE;
+                
+            END IF;
+            
+        EXCEPTION
+            WHEN E_COMISION_LIMITE THEN
+            
+                V_SQLERRM:='ORA-20001 Monto de comision sobrepaso limite permitido';
+                
+                INSERT INTO ERROR_PROCESO 
+                    VALUES(SEQ_ERROR.NEXTVAL,
+                           V_SQLERRM,
+                           'Se reemplazo el monto de comision calculada de '
+                           ||TO_CHAR(R_DETALLE.COMISIONES,'$999G999')
+                           ||' por el monto limite de '||TO_CHAR(:B_LIMITE_COMISION,'$999G999'));
+                COMMIT;
+                
+                R_DETALLE.COMISIONES:=:B_LIMITE_COMISION; 
+        
+        END;
+        
+        V_TOT_MONTO_COMISIONES:=V_TOT_MONTO_COMISIONES+R_DETALLE.COMISIONES;
+        
+        R_DETALLE.DELIVERY:=R_DETALLE.NUM_VENTAS*VARRAY_VALORES(6);
+        V_TOT_MONTO_DELIVERY:=V_TOT_MONTO_DELIVERY+R_DETALLE.DELIVERY;
+        
+        R_DETALLE.TOTAL_DESCUENTOS:= R_DETALLE.IMPUESTOS + 
+                                     R_DETALLE.DESCTOS_LINEA + 
+                                     R_DETALLE.COMISIONES + 
+                                     R_DETALLE.DELIVERY;
+        
+        V_TOT_MONTO_DESCUENTOS:=V_TOT_MONTO_DESCUENTOS+R_DETALLE.TOTAL_DESCUENTOS;
+        
+        R_DETALLE.TOTAL_VENTAS:=R_DETALLE.MONTO_VENTAS-
+                                R_DETALLE.TOTAL_DESCUENTOS;       
+        
+        V_TOT_TOTAL_VENTAS:=V_TOT_TOTAL_VENTAS+R_DETALLE.TOTAL_VENTAS;
+        
+        INSERT INTO DETALLE_LINEA VALUES R_DETALLE;
+        
+      END LOOP;
+      
+      R_RESUMEN.LINEA:=R_LINEA.NOM_LINEA;
+      R_RESUMEN.NUM_VENTAS:=V_TOT_NUM_VENTAS;
+      R_RESUMEN.MONTO_VENTAS:=V_TOT_MONTO_VENTAS;
+      R_RESUMEN.IMPUESTOS:=V_TOT_IMPUESTOS;
+      R_RESUMEN.DESCTOS_LINEA:=V_TOT_DESCTOS_LINEA;
+      R_RESUMEN.MONTO_COMISIONES:=V_TOT_MONTO_COMISIONES;
+      R_RESUMEN.MONTO_DELIVERY:=V_TOT_MONTO_DELIVERY;
+      R_RESUMEN.MONTO_DESCUENTOS:=V_TOT_MONTO_DESCUENTOS;
+      R_RESUMEN.TOTAL_VENTAS:=V_TOT_TOTAL_VENTAS;
+      
+      INSERT INTO RESUMEN_LINEA VALUES R_RESUMEN;
+      
+    END LOOP;
+    COMMIT;
+END;
+
+/
+--CASO 1
+DECLARE
+   -- cursor que recupera los viñateros o productores
+   CURSOR c1 IS
+   SELECT *
+   FROM productor
+   where id_productor in (select id_productor
+                          from producto);
+   -- cursor que recupera productos de cada viñatero
+   -- recibe como parámetro la id del productor
+   CURSOR c2 (n NUMBER) IS
+   SELECT *
+   FROM producto
+   WHERE id_productor = n;
+   counter number := 0;
+   r1 c1%rowtype;
+   r2 c2%rowtype;
+BEGIN
+   OPEN c1;
+   LOOP  
+      FETCH c1 INTO r1;  
+      dbms_output.put_line('####### LISTA DE VINOS DE LA VIÑA ' || '"' || UPPER(r1.nom_productor || '"'));
+      dbms_output.put_line(CHR(13));   
+      dbms_output.put_line(lpad('-',65,'-'));
+      dbms_output.put_line('  ID  NOMBRE PRODUCTO      STOCK  PRECIO ACTUAL   NUEVO PRECIO');
+      dbms_output.put_line(lpad('-',65,'-'));
+      counter := 0;
+      OPEN c2(r1.id_productor);
+      LOOP
+         FETCH c2 INTO r2;
+         counter := counter + 1;       
+             dbms_output.put_line(r2.id_producto
+                || ' ' || RPAD(r2.nom_producto, 20,' ')
+                || ' ' || TO_CHAR(r2.stock,'999')
+                || ' ' || rpad(TO_CHAR(r2.precio, '$9G999G999'),15, ' ')
+                || ' ' || TO_CHAR(r2.precio * 1.07, '$9G999G999'));
+         EXIT WHEN c2%NOTFOUND;       
+      END LOOP; 
+      CLOSE c2;
+      dbms_output.put_line(lpad('-',65,'-'));      
+      dbms_output.put_line('Total de productos en tienda: ' || counter);      
+      dbms_output.put_line(CHR(12));
+      EXIT WHEN c1%NOTFOUND;
+   END LOOP;
+   CLOSE c1;
+ END;
+
+/
+--CASO 1
+DECLARE
+   -- cursor que recupera los viñateros o productores
+   CURSOR c1 IS
+   SELECT *
+   FROM productor
+   where id_productor in (select id_productor
+                          from producto);
+   -- cursor que recupera productos de cada viñatero
+   -- recibe como parámetro la id del productor
+   CURSOR c2 (n NUMBER) IS
+   SELECT *
+   FROM producto
+   WHERE id_productor = n;
+   counter number := 0;
+   r1 c1%rowtype;
+   r2 c2%rowtype;
+BEGIN
+   OPEN c1;
+   LOOP  
+      FETCH c1 INTO r1;  
+      dbms_output.put_line('####### LISTA DE VINOS DE LA VIÑA ' || '"' || UPPER(r1.nom_productor || '"'));
+      dbms_output.put_line(CHR(13));   
+      dbms_output.put_line(lpad('-',65,'-'));
+      dbms_output.put_line('  ID  NOMBRE PRODUCTO      STOCK  PRECIO ACTUAL   NUEVO PRECIO');
+      dbms_output.put_line(lpad('-',65,'-'));
+      counter := 0;
+      OPEN c2(r1.id_productor);
+      LOOP
+         FETCH c2 INTO r2;
+         counter := counter + 1;       
+             dbms_output.put_line(r2.id_producto
+                || ' ' || RPAD(r2.nom_producto, 20,' ')
+                || ' ' || TO_CHAR(r2.stock,'999')
+                || ' ' || rpad(TO_CHAR(r2.precio, '$9G999G999'),15, ' ')
+                || ' ' || TO_CHAR(r2.precio * 1.07, '$9G999G999'));
+         EXIT WHEN c2%NOTFOUND;       
+      END LOOP; 
+      CLOSE c2;
+      dbms_output.put_line(lpad('-',65,'-'));      
+      dbms_output.put_line('Total de productos en tienda: ' || counter);      
+      dbms_output.put_line(CHR(12));
+      EXIT WHEN c1%NOTFOUND;
+   END LOOP;
+   CLOSE c1;
+ END;
